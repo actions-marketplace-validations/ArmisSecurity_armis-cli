@@ -190,6 +190,7 @@ func (c *Checker) fetchLatestVersion(ctx context.Context) (string, error) {
 }
 
 // getCacheFilePath returns the path to the cache file.
+// armis:ignore cwe:73 reason:cacheDir set from XDG/home path; SanitizePath validates before use
 func (c *Checker) getCacheFilePath() string {
 	if c.cacheDir != "" {
 		sanitized, err := util.SanitizePath(c.cacheDir)
@@ -233,7 +234,7 @@ func (c *Checker) writeCache(result *cacheFile) {
 	if path == "" {
 		return
 	}
-	// Validate the final path before writing to prevent path traversal (CWE-73)
+	// armis:ignore cwe:73 reason:SanitizePath IS the path traversal prevention; validates before any write
 	sanitizedPath, err := util.SanitizePath(path)
 	if err != nil {
 		return

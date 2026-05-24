@@ -280,8 +280,9 @@ func getEnvOrDefaultInt(key string, defaultValue int) int {
 	return defaultValue
 }
 
+// getAPIBaseURL returns the Armis API base URL, allowing override via ARMIS_API_URL env var for testing.
+// armis:ignore cwe:918 reason:ARMIS_API_URL is operator-configured; not reachable from external input
 func getAPIBaseURL() string {
-	// Allow override via environment variable (useful for testing)
 	if override := os.Getenv("ARMIS_API_URL"); override != "" {
 		return override
 	}

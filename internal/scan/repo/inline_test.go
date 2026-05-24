@@ -443,6 +443,134 @@ func TestApplyInlineSuppression(t *testing.T) {
 		}
 	})
 
+	t.Run("scans through Go func signature to find directive above", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "main.go", "package main\n// armis:ignore cwe:22\nfunc doSomething(path string) string {\n\treturn filepath.Join(path, \"subdir\")\n}\n")
+
+		findings := []model.Finding{
+			{File: "main.go", StartLine: 4, Type: model.FindingTypeVulnerability, CWEs: []string{"CWE-22"}},
+		}
+
+		count := ApplyInlineSuppression(findings, dir)
+		if count != 1 {
+			t.Fatalf("expected 1 (directive above func signature), got %d", count)
+		}
+	})
+
+	t.Run("scans through Go method signature to find directive above", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "main.go", "package main\n// armis:ignore cwe:22\nfunc (p *platform) ConfigDir(homeDir string) string {\n\treturn filepath.Join(homeDir, \".config\")\n}\n")
+
+		findings := []model.Finding{
+			{File: "main.go", StartLine: 4, Type: model.FindingTypeVulnerability, CWEs: []string{"CWE-22"}},
+		}
+
+		count := ApplyInlineSuppression(findings, dir)
+		if count != 1 {
+			t.Fatalf("expected 1 (directive above method signature), got %d", count)
+		}
+	})
+
+	t.Run("scans through Python def to find directive above", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "main.py", "import os\n# armis:ignore cwe:78\ndef run_command(cmd):\n    os.system(cmd)\n")
+
+		findings := []model.Finding{
+			{File: "main.py", StartLine: 4, Type: model.FindingTypeVulnerability, CWEs: []string{"CWE-78"}},
+		}
+
+		count := ApplyInlineSuppression(findings, dir)
+		if count != 1 {
+			t.Fatalf("expected 1 (directive above Python def), got %d", count)
+		}
+	})
+
+	t.Run("does not bleed func signature transparency across unrelated code", func(t *testing.T) {
+		dir := t.TempDir()
+		// Directive is for a different function; random code separates them
+		writeFile(t, dir, "main.go", "package main\n// armis:ignore cwe:22\nfunc safe() {}\nvar x = 1\nfunc unsafe(path string) string {\n\treturn filepath.Join(path, \"sub\")\n}\n")
+
+		findings := []model.Finding{
+			{File: "main.go", StartLine: 6, Type: model.FindingTypeVulnerability, CWEs: []string{"CWE-22"}},
+		}
+
+		count := ApplyInlineSuppression(findings, dir)
+		if count != 0 {
+			t.Fatalf("expected 0 (code line between func signatures breaks scan), got %d", count)
+		}
+	})
+
+	t.Run("func signature counts toward max scan window", func(t *testing.T) {
+		dir := t.TempDir()
+		// 6 lines above: directive is beyond the 5-line window even with func sig transparency
+		writeFile(t, dir, "main.go", "package main\n// armis:ignore cwe:22\n// c1\n// c2\n// c3\nfunc foo(p string) string {\n// c4\n\treturn filepath.Join(p, \"x\")\n}\n")
+
+		findings := []model.Finding{
+			{File: "main.go", StartLine: 8, Type: model.FindingTypeVulnerability, CWEs: []string{"CWE-22"}},
+		}
+
+		count := ApplyInlineSuppression(findings, dir)
+		if count != 0 {
+			t.Fatalf("expected 0 (directive beyond 5-line window even with func sig), got %d", count)
+		}
+	})
+
+	t.Run("scans through JS function keyword to find directive above", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "app.js", "// armis:ignore cwe:78\nfunction execCommand(cmd) {\n  child_process.exec(cmd);\n}\n")
+
+		findings := []model.Finding{
+			{File: "app.js", StartLine: 3, Type: model.FindingTypeVulnerability, CWEs: []string{"CWE-78"}},
+		}
+
+		count := ApplyInlineSuppression(findings, dir)
+		if count != 1 {
+			t.Fatalf("expected 1 (directive above JS function keyword), got %d", count)
+		}
+	})
+
+	t.Run("scans through class declaration to find directive above", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "app.py", "# armis:ignore cwe:94\nclass CommandRunner(BaseRunner):\n    def run(self, cmd):\n        os.system(cmd)\n")
+
+		findings := []model.Finding{
+			{File: "app.py", StartLine: 4, Type: model.FindingTypeVulnerability, CWEs: []string{"CWE-94"}},
+		}
+
+		count := ApplyInlineSuppression(findings, dir)
+		if count != 1 {
+			t.Fatalf("expected 1 (directive above class declaration), got %d", count)
+		}
+	})
+
+	t.Run("fn assignment in Go is not treated as Rust function signature", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "main.go", "package main\n// armis:ignore cwe:78\nfn := getHandler()\nfn(userInput)\n")
+
+		findings := []model.Finding{
+			{File: "main.go", StartLine: 4, Type: model.FindingTypeVulnerability, CWEs: []string{"CWE-78"}},
+		}
+
+		count := ApplyInlineSuppression(findings, dir)
+		if count != 0 {
+			t.Fatalf("expected 0 (fn := is Go assignment, not Rust func sig), got %d", count)
+		}
+	})
+
+	t.Run("class without brace/colon/paren is not treated as signature", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "app.py", "# armis:ignore cwe:78\nclass_name = 'foo'\nos.system(class_name)\n")
+
+		findings := []model.Finding{
+			{File: "app.py", StartLine: 3, Type: model.FindingTypeVulnerability, CWEs: []string{"CWE-78"}},
+		}
+
+		count := ApplyInlineSuppression(findings, dir)
+		if count != 0 {
+			t.Fatalf("expected 0 (class_name is not a class declaration), got %d", count)
+		}
+	})
+
 	t.Run("suppresses finding with directive exactly 5 lines above (max window)", func(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "main.go", "package main\n// armis:ignore cwe:79\n// c1\n// c2\n// c3\n// c4\nvar x = unsafe(input)\n")

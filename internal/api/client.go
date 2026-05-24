@@ -238,8 +238,8 @@ func (c *Client) setAuthHeader(ctx context.Context, req *http.Request) error {
 	scheme := strings.ToLower(req.URL.Scheme)
 
 	// Require HTTPS for non-localhost hosts to protect credentials
+	// armis:ignore cwe:918 reason:request URL is constructed from operator-configured base URL, not external input
 	// armis:ignore cwe:522 reason:this code IS the credential protection check (HTTPS enforcement)
-	// #nosec G402 -- Localhost exception intentional for local development/testing
 	if host != hostLocalhost && host != hostLoopbackIP && scheme != schemeHTTPS {
 		return fmt.Errorf("refusing to send credentials over insecure scheme %q", scheme)
 	}
@@ -269,7 +269,7 @@ type StatusCallback func(status model.IngestStatusData)
 
 // StartIngest uploads an artifact for scanning and returns the scan ID.
 func (c *Client) StartIngest(ctx context.Context, opts IngestOptions) (string, error) {
-	// Validate upload size for defense-in-depth
+	// armis:ignore cwe:770 reason:this IS the resource exhaustion prevention; MaxUploadSize bounds upload size
 	if opts.Size > MaxUploadSize {
 		return "", fmt.Errorf("upload size (%d bytes) exceeds maximum allowed (%d bytes)", opts.Size, MaxUploadSize)
 	}

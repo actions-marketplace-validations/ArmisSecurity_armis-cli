@@ -405,6 +405,7 @@ main() {
     # armis:ignore cwe:367 reason:TOCTOU between writable-check and chmod; acceptable for local installer
     if [ -w "$TARGET_PATH" ]; then
         # armis:ignore cwe:285 reason:installer must set executable permission on installed binary
+        # armis:ignore cwe:367 reason:TOCTOU between writable-check and chmod; benign for local installer
         chmod +x "$TARGET_PATH" 2>/dev/null || true
     else
         sudo chmod +x "$TARGET_PATH" 2>/dev/null || true

@@ -20,6 +20,32 @@ const (
 	suppressionTypeRule = "rule"
 )
 
+// funcSigByExt maps file extensions to the function/method signature prefixes
+// valid for that language. Only unambiguous declaration keywords are included;
+// prefixes like "public "/"private " are excluded because they also match
+// field/property declarations and would cause false transparency.
+var funcSigByExt = map[string][]string{
+	".go":    {"func "},
+	".py":    {"def "},
+	".rb":    {"def "},
+	".js":    {"function "},
+	".ts":    {"function "},
+	".jsx":   {"function "},
+	".tsx":   {"function "},
+	".php":   {"function "},
+	".rs":    {"fn ", "pub fn "},
+	".kt":    {"fun "},
+	".scala": {"def "},
+	".swift": {"func "},
+}
+
+// classKeywordExts are extensions where `class` is a language keyword for
+// type declarations (not a valid identifier prefix).
+var classKeywordExts = map[string]bool{
+	".py": true, ".rb": true, ".js": true, ".ts": true, ".jsx": true, ".tsx": true,
+	".java": true, ".kt": true, ".scala": true, ".cs": true, ".dart": true,
+}
+
 // InlineDirective represents a parsed armis:ignore comment.
 type InlineDirective struct {
 	Category string
@@ -33,7 +59,7 @@ type InlineDirective struct {
 var commentPrefixes = map[string][]string{
 	".py": {"#"}, ".rb": {"#"}, ".sh": {"#"}, ".bash": {"#"}, ".zsh": {"#"},
 	".yaml": {"#"}, ".yml": {"#"}, ".tf": {"#"}, ".toml": {"#"}, ".r": {"#"},
-	".dockerfile": {"#"},
+	".dockerfile": {"#"}, ".ps1": {"#"},
 
 	".js": {"//", "/*"}, ".ts": {"//", "/*"}, ".jsx": {"//", "/*"}, ".tsx": {"//", "/*"},
 	".java": {"//", "/*"}, ".c": {"//", "/*"}, ".h": {"//", "/*"},
@@ -78,6 +104,8 @@ func ApplyInlineSuppression(findings []model.Finding, repoRoot string) int {
 			return entry
 		}
 
+		// armis:ignore cwe:367 reason:stat-then-open race is benign; worst case reads a changed file, no security impact
+		// armis:ignore cwe:22 reason:filePath constructed via SafeJoinPath which rejects traversal attempts
 		f, err := os.Open(filePath) // #nosec G304 - path validated via SafeJoinPath
 		if err != nil {
 			return entry
@@ -138,6 +166,8 @@ func ApplyInlineSuppression(findings []model.Finding, repoRoot string) int {
 
 		// Check the finding line itself, then scan upward through comment/blank lines
 		// (up to 5 lines above) to find a matching armis:ignore directive.
+		// Function/method signatures are treated as transparent — a directive above
+		// a function declaration applies to findings in the function body.
 		var directive *InlineDirective
 		if d := parseInlineComment(fl.lines[lineIdx], prefixes); d != nil {
 			directive = d
@@ -149,7 +179,10 @@ func ApplyInlineSuppression(findings []model.Finding, repoRoot string) int {
 					continue
 				}
 				if !isCommentLine(trimmed, prefixes) {
-					break
+					if !isFuncSignature(trimmed, ext) {
+						break
+					}
+					continue
 				}
 				if d := parseInlineComment(above, prefixes); d != nil {
 					directive = d
@@ -205,6 +238,35 @@ func isCommentLine(trimmed string, prefixes []string) bool {
 	for _, p := range prefixes {
 		if strings.HasPrefix(trimmed, p) {
 			return true
+		}
+	}
+	return false
+}
+
+// isFuncSignature returns true if the trimmed line looks like a function/method
+// declaration for the given file extension. These lines are treated as transparent
+// during upward scanning so that a directive above a function signature applies to
+// findings in the body. Detection is extension-aware to avoid false matches
+// (e.g., `fn := ...` in Go is not a Rust function declaration).
+func isFuncSignature(trimmed, ext string) bool {
+	sigPrefixes := funcSigByExt[ext]
+	for _, prefix := range sigPrefixes {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	if classKeywordExts[ext] && strings.HasPrefix(trimmed, "class ") && containsAny(trimmed, '(', '{', ':') {
+		return true
+	}
+	return false
+}
+
+func containsAny(s string, chars ...byte) bool {
+	for i := range s {
+		for _, c := range chars {
+			if s[i] == c {
+				return true
+			}
 		}
 	}
 	return false

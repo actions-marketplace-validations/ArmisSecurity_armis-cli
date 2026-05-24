@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -166,11 +167,11 @@ func uninstallTargets(u *install.Uninstaller, targets []string) error {
 
 func confirm(prompt string) bool {
 	fmt.Fprintf(os.Stderr, "%s [y/N] ", prompt)
-	reader := bufio.NewReader(os.Stdin)
-	line, err := reader.ReadString('\n')
-	if err != nil {
+	scanner := bufio.NewScanner(io.LimitReader(os.Stdin, 256))
+	if !scanner.Scan() {
 		return false
 	}
+	line := scanner.Text()
 	answer := strings.TrimSpace(strings.ToLower(line))
 	return answer == "y" || answer == "yes"
 }

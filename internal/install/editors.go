@@ -114,7 +114,7 @@ type EditorInstaller struct {
 // NewEditorInstaller creates an installer using the shared plugin directory (~/.armis/plugins/armis-appsec-mcp).
 func NewEditorInstaller() *EditorInstaller {
 	// armis:ignore cwe:253 reason:UserHomeDir error results in empty string which fails gracefully downstream
-	home, _ := os.UserHomeDir()
+	home, _ := os.UserHomeDir() //nolint:errcheck // armis:ignore cwe:253
 	return &EditorInstaller{
 		pluginDir: filepath.Join(home, ".armis", "plugins", "armis-appsec-mcp"),
 		plugin:    newPluginInstaller(),
@@ -337,7 +337,8 @@ func stdServerEntry(pluginDir string) map[string]interface{} {
 
 func readJSONFileAsMap(path string) map[string]interface{} {
 	data := make(map[string]interface{})
-	// armis:ignore cwe:22 reason:path is constructed from filepath.Join with known base dirs; filepath.Clean applied
+	// armis:ignore cwe:22 reason:path from filepath.Join with known base dirs; filepath.Clean applied
+	// armis:ignore cwe:253 reason:ReadFile error handled by err == nil guard; non-critical config read
 	if b, err := os.ReadFile(filepath.Clean(path)); err == nil {
 		_ = json.Unmarshal(b, &data)
 	}
