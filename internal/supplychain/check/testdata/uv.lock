@@ -1,0 +1,27 @@
+[[package]]
+name = "flask"
+version = "3.0.0"
+
+[[package]]
+name = "requests"
+version = "2.31.0"
+
+[[package]]
+name = "my-local"
+version = "0.1.0"
+
+[package.source]
+type = "path"
+url = "./local"
+
+[[package]]
+name = "my-url-dep"
+version = "2.0.0"
+
+[package.source]
+type = "url"
+url = "https://example.com/my_url_dep-2.0.0-py3-none-any.whl"
+
+[[package]]
+name = "numpy"
+version = "1.26.2"

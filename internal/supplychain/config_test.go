@@ -3,6 +3,7 @@ package supplychain
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -78,6 +79,26 @@ ecosystems:
 		_, err := LoadConfig(dir)
 		if err == nil {
 			t.Error("expected error for invalid YAML")
+		}
+	})
+
+	t.Run("file too large", func(t *testing.T) {
+		// A config larger than maxConfigSize must fail with a clear "too large"
+		// error rather than being silently truncated and surfacing as a confusing
+		// YAML parse error.
+		dir := t.TempDir()
+		oversized := make([]byte, maxConfigSize+1)
+		for i := range oversized {
+			oversized[i] = 'a'
+		}
+		os.WriteFile(filepath.Join(dir, ConfigFileName), oversized, 0o600) //nolint:errcheck,gosec
+
+		_, err := LoadConfig(dir)
+		if err == nil {
+			t.Fatal("expected error for oversized config file")
+		}
+		if !strings.Contains(err.Error(), "too large") {
+			t.Fatalf("expected 'too large' error, got: %v", err)
 		}
 	})
 }

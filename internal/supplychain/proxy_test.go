@@ -596,6 +596,11 @@ func TestExtractPackageNameFromPath(t *testing.T) {
 		{"/@scope%2Fname", "@scope/name"},
 		{"/@scope%2fname", "@scope/name"},
 		{"/@types%2Fnode", "@types/node"},
+		// Fully percent-encoded scope, including %40 for "@". Without decoding
+		// "@", "%40types" would be misread as an unscoped package.
+		{"/%40types%2Fnode", "@types/node"},
+		{"/%40scope%2Fname", "@scope/name"},
+		{"/%40scope%2Fname%2F1.0.0", "@scope/name"},
 	}
 
 	for _, tt := range tests {
@@ -866,5 +871,91 @@ func TestProxyFailOpen_RegistryUnreachable(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if strings.Contains(string(body), "supply-chain: registry unreachable") {
 		t.Errorf("fail-open should not emit the age-check unreachable error; got body %q", string(body))
+	}
+}
+
+// oversizeUpstream returns an httptest server whose metadata response exceeds
+// maxProxyResponseSize, so handleMetadataFiltering's truncation guard fires.
+func oversizeUpstream(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		filler := make([]byte, maxProxyResponseSize+1)
+		for i := range filler {
+			filler[i] = 'a'
+		}
+		_, _ = w.Write(filler)
+	}))
+	return srv
+}
+
+func TestProxyFailClosed_ResponseTooLarge(t *testing.T) {
+	upstream := oversizeUpstream(t)
+	defer upstream.Close()
+
+	proxy, err := NewProxy(ProxyConfig{
+		Policy:      Policy{MinReleaseAge: 72 * time.Hour, FailOpen: false},
+		UpstreamURL: upstream.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewProxy: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	addr, _ := proxy.Start(ctx)
+	defer proxy.Close() //nolint:errcheck,gosec
+
+	req, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/express", nil)
+	req.Header.Set("Accept", "application/json")
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec // G704: local test proxy on 127.0.0.1
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck,gosec
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("fail-closed should return 502 when upstream response is too large, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "too large") {
+		t.Errorf("expected 'too large' error body, got %q", string(body))
+	}
+}
+
+func TestProxyFailOpen_ResponseTooLarge(t *testing.T) {
+	upstream := oversizeUpstream(t)
+	defer upstream.Close()
+
+	proxy, err := NewProxy(ProxyConfig{
+		Policy:      Policy{MinReleaseAge: 72 * time.Hour, FailOpen: true},
+		UpstreamURL: upstream.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewProxy: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	addr, _ := proxy.Start(ctx)
+	defer proxy.Close() //nolint:errcheck,gosec
+
+	req, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/express", nil)
+	req.Header.Set("Accept", "application/json")
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec // G704: local test proxy on 127.0.0.1
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck,gosec
+
+	// With fail-open an oversize upstream response falls through to the reverse
+	// proxy, which streams the upstream body verbatim (200), rather than our 502
+	// "too large" short-circuit.
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("fail-open should pass the oversize response through (200), got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if strings.Contains(string(body), "supply-chain: upstream response too large") {
+		t.Errorf("fail-open should not emit the too-large error; got body %q", string(body))
 	}
 }

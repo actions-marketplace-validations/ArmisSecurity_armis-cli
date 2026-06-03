@@ -162,9 +162,16 @@ func (c *Client) fetchMetadata(ctx context.Context, name string) (*registryRespo
 		return nil, fmt.Errorf("registry returned %d for %s", resp.StatusCode, name)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
+	// Read one byte past the cap so an oversize response is detectable: a body
+	// at exactly maxResponseSize reads to maxResponseSize, while anything larger
+	// yields maxResponseSize+1 bytes. Without this, LimitReader would silently
+	// truncate and the failure would surface as a confusing JSON parse error.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading response for %s: %w", name, err)
+	}
+	if int64(len(body)) > maxResponseSize {
+		return nil, fmt.Errorf("registry response for %s too large (max %d bytes)", name, maxResponseSize)
 	}
 
 	var result registryResponse

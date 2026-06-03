@@ -29,6 +29,11 @@ func TestParseDuration(t *testing.T) {
 		{"-Infd", 0, true},
 		{"-3d", 0, true},
 		{"-1w", 0, true},
+		// time.ParseDuration (the default branch) accepts signed values, but a
+		// negative min-age is nonsensical and would disable enforcement, so the
+		// standard-suffix path must reject negatives too.
+		{"-72h", 0, true},
+		{"-1h30m", 0, true},
 		// Extremely large 'd'/'w' values overflow int64 nanoseconds. The float→int
 		// conversion is implementation-defined and can wrap to a negative/tiny
 		// duration, silently disabling min-age enforcement, so these must error.

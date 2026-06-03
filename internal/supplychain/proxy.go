@@ -210,7 +210,11 @@ func (p *Proxy) handleMetadataFiltering(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxProxyResponseSize))
+	// Read one byte past the cap so an oversize response is detectable rather
+	// than silently truncated: a body larger than maxProxyResponseSize yields
+	// maxProxyResponseSize+1 bytes, which would otherwise be fed to the JSON
+	// filter as incomplete data.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxProxyResponseSize+1))
 	if err != nil {
 		if p.policy.FailOpen {
 			fmt.Fprintf(os.Stderr, "[armis] supply-chain: age check unavailable for %s, allowing (fail-open): %v\n", pkgName, err)
@@ -218,6 +222,15 @@ func (p *Proxy) handleMetadataFiltering(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		http.Error(w, fmt.Sprintf("[armis] supply-chain: failed to read upstream response for %s", pkgName), http.StatusBadGateway)
+		return
+	}
+	if int64(len(body)) > maxProxyResponseSize {
+		if p.policy.FailOpen {
+			fmt.Fprintf(os.Stderr, "[armis] supply-chain: upstream response too large for %s, allowing (fail-open)\n", pkgName)
+			p.reverseProxy(w, r)
+			return
+		}
+		http.Error(w, fmt.Sprintf("[armis] supply-chain: upstream response too large for %s", pkgName), http.StatusBadGateway)
 		return
 	}
 
@@ -432,16 +445,19 @@ func (p *Proxy) reverseProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 func extractPackageNameFromPath(path string) string {
+	// npm clients may request scoped metadata with percent-encoded characters
+	// (e.g. /%40scope%2Fname for @scope/name). Decode up front so scoped
+	// detection works for both encoded and decoded forms; %40→@ and %2F→/ in
+	// particular must round-trip. PathUnescape errors only on malformed escapes,
+	// in which case we keep the original and fall through to best-effort parsing.
+	if decoded, err := url.PathUnescape(path); err == nil {
+		path = decoded
+	}
+
 	path = strings.TrimPrefix(path, "/")
 	if path == "" {
 		return ""
 	}
-
-	// npm clients commonly request scoped metadata with a URL-encoded slash
-	// (e.g. /@scope%2Fname). Normalize it so scoped detection works in both
-	// the decoded (/@scope/name) and encoded forms.
-	path = strings.ReplaceAll(path, "%2F", "/")
-	path = strings.ReplaceAll(path, "%2f", "/")
 
 	// Scoped package: @scope/name
 	if strings.HasPrefix(path, "@") {

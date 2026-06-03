@@ -25,7 +25,8 @@ var scInitCmd = &cobra.Command{
 
 This wraps your package manager (auto-detected from lockfiles) so that armis-cli
 can enforce age policies on package installations. Node PMs (npm, pnpm, bun, yarn)
-use a transparent proxy that filters registry responses.
+and pip/uv use a transparent proxy that filters registry responses. poetry, pipenv,
+and pdm use a pre-install check that blocks the build if violations are found.
 
 Four modes are available:
   rc     — Inject shell functions into ~/.bashrc / ~/.zshrc (default, interactive)
@@ -95,15 +96,26 @@ func detectWrappablePMs() []string {
 	seen := make(map[string]bool)
 	var pms []string
 
+	addPM := func(pm string) {
+		if pm == "" || seen[pm] {
+			return
+		}
+		seen[pm] = true
+		pms = append(pms, pm)
+	}
+
 	for _, e := range ecosystems {
 		pm := ecosystemToPM(e.Ecosystem)
-		if pm == "" {
+		// A bare requirements.txt is installed with pip, which can be present
+		// under several names (pip, pip3, pip3.12). Wrap every variant on PATH
+		// so enforcement holds regardless of which one the user invokes.
+		if pm == pmPip {
+			for _, variant := range supplychain.DetectPipVariants() {
+				addPM(variant)
+			}
 			continue
 		}
-		if !seen[pm] {
-			seen[pm] = true
-			pms = append(pms, pm)
-		}
+		addPM(pm)
 	}
 
 	if len(pms) == 0 {
@@ -122,6 +134,16 @@ func ecosystemToPM(eco supplychain.Ecosystem) string {
 		return pmBun
 	case supplychain.EcosystemYarn:
 		return pmYarn
+	case supplychain.EcosystemPip:
+		return pmPip
+	case supplychain.EcosystemPoetry:
+		return pmPoetry
+	case supplychain.EcosystemPipfile:
+		return pmPipenv
+	case supplychain.EcosystemPDM:
+		return pmPDM
+	case supplychain.EcosystemUV:
+		return pmUV
 	default:
 		return ""
 	}

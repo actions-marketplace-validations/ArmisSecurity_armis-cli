@@ -38,9 +38,15 @@ func LoadConfig(dir string) (*Config, error) {
 	}
 	defer func() { _ = f.Close() }()
 
-	data, err := io.ReadAll(io.LimitReader(f, maxConfigSize))
+	// Read one byte past the cap so an oversize config is reported clearly
+	// instead of being silently truncated and failing as a confusing YAML
+	// parse error.
+	data, err := io.ReadAll(io.LimitReader(f, maxConfigSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", ConfigFileName, err)
+	}
+	if len(data) > maxConfigSize {
+		return nil, fmt.Errorf("%s too large (max %d bytes)", ConfigFileName, maxConfigSize)
 	}
 
 	var cfg Config

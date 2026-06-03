@@ -4,6 +4,7 @@ package check
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -93,14 +94,30 @@ func parseLockfile(ecosystem supplychain.Ecosystem, path string) ([]PackageEntry
 		return ParseBunLockfile(path)
 	case supplychain.EcosystemYarn:
 		return ParseYarnLockfile(path)
+	case supplychain.EcosystemPip:
+		return ParsePipRequirements(path)
+	case supplychain.EcosystemPoetry:
+		return ParsePoetryLockfile(path)
+	case supplychain.EcosystemPipfile:
+		return ParsePipfileLock(path)
+	case supplychain.EcosystemPDM:
+		return ParsePDMLockfile(path)
+	case supplychain.EcosystemUV:
+		return ParseUVLockfile(path)
 	default:
 		return ParseNPMLockfile(path)
 	}
 }
 
-func queryRegistry(ctx context.Context, _ supplychain.Ecosystem, packages []registry.PackageRequest) []registry.QueryResult {
-	client := registry.NewClient()
-	return client.GetPublishDates(ctx, packages)
+func queryRegistry(ctx context.Context, ecosystem supplychain.Ecosystem, packages []registry.PackageRequest) []registry.QueryResult {
+	switch ecosystem {
+	case supplychain.EcosystemPip, supplychain.EcosystemPoetry, supplychain.EcosystemPipfile, supplychain.EcosystemPDM, supplychain.EcosystemUV:
+		client := registry.NewPyPIClient()
+		return client.GetPublishDates(ctx, packages)
+	default:
+		client := registry.NewClient()
+		return client.GetPublishDates(ctx, packages)
+	}
 }
 
 func detectEcosystemFromPath(path string) supplychain.Ecosystem {
@@ -112,9 +129,33 @@ func detectEcosystemFromPath(path string) supplychain.Ecosystem {
 		return supplychain.EcosystemBun
 	case strings.HasSuffix(lower, "yarn.lock") || strings.HasSuffix(lower, "yarn-berry.lock"):
 		return supplychain.EcosystemYarn
+	case strings.HasSuffix(lower, "poetry.lock"):
+		return supplychain.EcosystemPoetry
+	case strings.HasSuffix(lower, "pipfile.lock"):
+		return supplychain.EcosystemPipfile
+	case strings.HasSuffix(lower, "pdm.lock"):
+		return supplychain.EcosystemPDM
+	case strings.HasSuffix(lower, "uv.lock"):
+		return supplychain.EcosystemUV
+	case isRequirementsFile(lower):
+		return supplychain.EcosystemPip
 	default:
 		return supplychain.EcosystemNPM
 	}
+}
+
+// isRequirementsFile reports whether a lowercased path is a pip requirements
+// file. It matches the conventional layouts (requirements.txt, requirements-dev.txt,
+// and the requirements/<name>.txt directory split) by requiring both a
+// "requirements" path segment and a .txt extension. The .txt guard is what keeps
+// pip-tools input files (requirements.in, which hold unpinned specifiers
+// ParsePipRequirements would silently drop) from being misclassified as a pinned
+// lockfile and yielding a false "all clear".
+func isRequirementsFile(lowerPath string) bool {
+	if !strings.HasSuffix(lowerPath, ".txt") {
+		return false
+	}
+	return strings.Contains(filepath.ToSlash(lowerPath), "requirements")
 }
 
 func diffEntries(current, base []PackageEntry) []PackageEntry {

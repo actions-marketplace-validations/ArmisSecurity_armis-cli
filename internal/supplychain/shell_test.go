@@ -8,6 +8,11 @@ import (
 	"testing"
 )
 
+// pipExe is the bare pip executable name, used throughout the pip-variant
+// detection tests. It is the command/binary name (distinct from the
+// EcosystemPip ecosystem identifier), so it gets its own test constant.
+const pipExe = "pip"
+
 func TestGenerateWrapper_Posix(t *testing.T) {
 	wrapper := GenerateWrapper("bash", []string{"npm"})
 
@@ -277,4 +282,117 @@ func TestEvalCommand(t *testing.T) {
 	if !strings.Contains(cmd, "npm()") {
 		t.Error("eval command should contain npm function")
 	}
+}
+
+func TestIsPipVariant(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{pipExe, true},
+		{"pip3", true},
+		{"pip3.11", true},
+		{"pip3.12", true},
+		// Distinct tools that merely share the "pip" prefix must not match.
+		{"pipx", false},
+		{"pipenv", false},
+		{"pip-compile", false},
+		{"npm", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsPipVariant(tt.name); got != tt.want {
+				t.Errorf("IsPipVariant(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestGenerateWrapper_WrapsVersionedPip verifies that a versioned pip variant
+// survives sanitization and is emitted as a wrapper function. Before the
+// validPMName fix, the dot in "pip3.12" caused sanitizePMNames to drop it, so
+// `pip3.12 install` silently bypassed enforcement.
+func TestGenerateWrapper_WrapsVersionedPip(t *testing.T) {
+	wrapper := GenerateWrapper("bash", []string{"pip3.12"})
+	if !strings.Contains(wrapper, "pip3.12()") {
+		t.Errorf("versioned pip variant should be wrapped, got:\n%s", wrapper)
+	}
+	if !strings.Contains(wrapper, "supply-chain wrap pip3.12") {
+		t.Errorf("wrapper should forward the exact variant name, got:\n%s", wrapper)
+	}
+}
+
+func TestDetectPipVariants(t *testing.T) {
+	t.Run("finds and sorts variants on PATH", func(t *testing.T) {
+		dir := t.TempDir()
+		for _, name := range []string{pipExe, "pip3", "pip3.12"} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte{}, 0o755); err != nil { //nolint:gosec
+				t.Fatalf("seed %s: %v", name, err)
+			}
+		}
+		t.Setenv("PATH", dir)
+
+		got := DetectPipVariants()
+		want := []string{pipExe, "pip3", "pip3.12"}
+		if !equalStrings(got, want) {
+			t.Errorf("DetectPipVariants() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("ignores lookalike commands", func(t *testing.T) {
+		dir := t.TempDir()
+		for _, name := range []string{pipExe, "pipx", "pipenv", "pip-compile"} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte{}, 0o755); err != nil { //nolint:gosec
+				t.Fatalf("seed %s: %v", name, err)
+			}
+		}
+		t.Setenv("PATH", dir)
+
+		for _, v := range DetectPipVariants() {
+			if v == "pipx" || v == "pipenv" || v == "pip-compile" {
+				t.Errorf("DetectPipVariants returned non-pip executable %q", v)
+			}
+		}
+	})
+
+	t.Run("deduplicates across PATH dirs", func(t *testing.T) {
+		dir1, dir2 := t.TempDir(), t.TempDir()
+		os.WriteFile(filepath.Join(dir1, pipExe), []byte{}, 0o755) //nolint:errcheck,gosec
+		os.WriteFile(filepath.Join(dir2, pipExe), []byte{}, 0o755) //nolint:errcheck,gosec
+		t.Setenv("PATH", dir1+string(os.PathListSeparator)+dir2)
+
+		got := DetectPipVariants()
+		if len(got) != 1 || got[0] != pipExe {
+			t.Errorf("expected exactly one 'pip' after dedup, got %v", got)
+		}
+	})
+
+	t.Run("falls back to pip when none found", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		got := DetectPipVariants()
+		if len(got) != 1 || got[0] != pipExe {
+			t.Errorf("expected [pip] fallback, got %v", got)
+		}
+	})
+
+	t.Run("falls back to pip when PATH is unset", func(t *testing.T) {
+		t.Setenv("PATH", "")
+		got := DetectPipVariants()
+		if len(got) != 1 || got[0] != pipExe {
+			t.Errorf("expected [pip] fallback, got %v", got)
+		}
+	})
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

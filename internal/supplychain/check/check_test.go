@@ -6,6 +6,11 @@ import (
 	"github.com/ArmisSecurity/armis-cli/internal/supplychain"
 )
 
+// testPkgSQLAlchemy is the mixed-case package name used across the Python
+// lockfile fixtures to assert that parsers apply PEP 503 name normalization
+// (lowercasing). Shared so the assertion reads the same in every parser test.
+const testPkgSQLAlchemy = "SQLAlchemy"
+
 func TestDiffEntries(t *testing.T) {
 	t.Run("returns only new packages", func(t *testing.T) {
 		current := []PackageEntry{
@@ -80,6 +85,22 @@ func TestDetectEcosystemFromPath(t *testing.T) {
 		{"yarn.lock", supplychain.EcosystemYarn},
 		{"/project/yarn.lock", supplychain.EcosystemYarn},
 		{"unknown.lock", supplychain.EcosystemNPM},
+		// Python ecosystems.
+		{"poetry.lock", supplychain.EcosystemPoetry},
+		{"/srv/app/poetry.lock", supplychain.EcosystemPoetry},
+		{"Pipfile.lock", supplychain.EcosystemPipfile},
+		{"/home/u/Pipfile.lock", supplychain.EcosystemPipfile},
+		{"pdm.lock", supplychain.EcosystemPDM},
+		{"uv.lock", supplychain.EcosystemUV},
+		{"requirements.txt", supplychain.EcosystemPip},
+		{"/project/requirements-dev.txt", supplychain.EcosystemPip},
+		{"/project/requirements/base.txt", supplychain.EcosystemPip},
+		// requirements.in (pip-tools input, unpinned) must NOT be treated as a
+		// pinned requirements lockfile — doing so would silently skip every
+		// unpinned line and report a false "all clear". It falls through to the
+		// npm default, which simply fails to parse rather than passing silently.
+		{"requirements.in", supplychain.EcosystemNPM},
+		{"/project/requirements.in", supplychain.EcosystemNPM},
 	}
 
 	for _, tt := range tests {

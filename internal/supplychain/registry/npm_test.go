@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -96,6 +97,30 @@ func TestGetPublishDate(t *testing.T) {
 		_, err := client.GetPublishDate(context.Background(), "express", "4.18.2")
 		if err == nil {
 			t.Error("expected error for 429")
+		}
+	})
+
+	t.Run("response too large", func(t *testing.T) {
+		// A registry body larger than maxResponseSize must fail with a clear
+		// "too large" error rather than being silently truncated by LimitReader
+		// and surfacing as a confusing JSON parse error.
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			filler := make([]byte, maxResponseSize+1)
+			for i := range filler {
+				filler[i] = 'a'
+			}
+			_, _ = w.Write(filler)
+		}))
+		defer server.Close()
+
+		client := NewClientWithHTTP(server.Client(), server.URL)
+		_, err := client.GetPublishDate(context.Background(), "express", "4.18.2")
+		if err == nil {
+			t.Fatal("expected error for oversized response")
+		}
+		if !strings.Contains(err.Error(), "too large") {
+			t.Fatalf("expected 'too large' error, got: %v", err)
 		}
 	})
 

@@ -30,10 +30,15 @@ func readLockfile(path string) ([]byte, error) {
 	defer f.Close() //nolint:errcheck // best-effort close on read path
 
 	// io.LimitReader caps the read at maxLockfileSize so a huge file cannot
-	// exhaust memory (CWE-770).
-	data, err := io.ReadAll(io.LimitReader(f, maxLockfileSize))
+	// exhaust memory (CWE-770). Read one byte past the cap so an oversize file
+	// is reported clearly instead of being silently truncated and failing later
+	// as a confusing JSON/YAML parse error.
+	data, err := io.ReadAll(io.LimitReader(f, maxLockfileSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading lockfile: %w", err)
+	}
+	if len(data) > maxLockfileSize {
+		return nil, fmt.Errorf("lockfile too large (max %d bytes): %s", maxLockfileSize, path)
 	}
 	return data, nil
 }

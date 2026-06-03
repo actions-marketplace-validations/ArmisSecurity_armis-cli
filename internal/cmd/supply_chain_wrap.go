@@ -12,6 +12,7 @@ import (
 	"github.com/ArmisSecurity/armis-cli/internal/model"
 	"github.com/ArmisSecurity/armis-cli/internal/output"
 	"github.com/ArmisSecurity/armis-cli/internal/supplychain"
+	"github.com/ArmisSecurity/armis-cli/internal/supplychain/check"
 	"github.com/spf13/cobra"
 )
 
@@ -29,10 +30,15 @@ const (
 // allowlist, the registry-env switch, and the exec mapping in sync and avoids
 // scattering the literals across the file.
 const (
-	pmNPM  = "npm"
-	pmPNPM = "pnpm"
-	pmBun  = "bun"
-	pmYarn = "yarn"
+	pmNPM    = "npm"
+	pmPNPM   = "pnpm"
+	pmBun    = "bun"
+	pmYarn   = "yarn"
+	pmPip    = "pip"
+	pmUV     = "uv"
+	pmPoetry = "poetry"
+	pmPipenv = "pipenv"
+	pmPDM    = "pdm"
 )
 
 var scWrapCmd = &cobra.Command{
@@ -48,14 +54,23 @@ func init() {
 	supplyChainCmd.AddCommand(scWrapCmd)
 }
 
-var allowedPMs = map[string]bool{pmNPM: true, pmPNPM: true, pmBun: true, pmYarn: true}
+var allowedPMs = map[string]bool{
+	pmNPM: true, pmPNPM: true, pmBun: true, pmYarn: true,
+	pmPip: true, pmUV: true, pmPoetry: true, pmPipenv: true, pmPDM: true,
+}
 
 func runSupplyChainWrap(cmd *cobra.Command, args []string) error {
+	// pmName is the exact command the user invoked (e.g. "pip3.12"); execName is
+	// the binary actually run. canonicalPM collapses pip variants (pip3, pip3.12)
+	// to "pip" for every policy decision — the allowlist, pre-install routing, and
+	// registry-env all behave identically for any pip — while pmName is preserved
+	// for execution so a versioned variant still installs into its own interpreter.
 	pmName := args[0]
 	pmArgs := args[1:]
+	canonical := canonicalPM(pmName)
 
-	if !allowedPMs[pmName] {
-		return fmt.Errorf("unsupported package manager: %s (allowed: npm, pnpm, bun, yarn)", pmName)
+	if !allowedPMs[canonical] {
+		return fmt.Errorf("unsupported package manager: %s (allowed: npm, pnpm, bun, yarn, pip, uv, poetry, pipenv, pdm)", pmName)
 	}
 
 	if os.Getenv(envSCActive) == "1" {
@@ -67,7 +82,26 @@ func runSupplyChainWrap(cmd *cobra.Command, args []string) error {
 		return exitWithCode(execPM(pmName, pmArgs, nil))
 	}
 
+	// poetry, pipenv, and pdm resolve dependencies through their own lockfiles
+	// rather than honoring an npm-style registry override, so they cannot be
+	// enforced via the transparent proxy. Instead we audit the lockfile and
+	// hard-block the build before it runs if any package is too young.
+	if requiresPreInstallBlock(canonical) {
+		return runPreInstallBlock(cmd, pmName, pmArgs)
+	}
+
 	return runProxyWrap(cmd, pmName, pmArgs)
+}
+
+// canonicalPM maps a user-invoked package-manager name to the name used for
+// policy decisions. pip variants (pip3, pip3.11, pip3.12) all resolve to PyPI
+// and share one enforcement path, so they collapse to "pip"; every other name
+// is returned unchanged.
+func canonicalPM(pm string) string {
+	if supplychain.IsPipVariant(pm) {
+		return pmPip
+	}
+	return pm
 }
 
 func runProxyWrap(cmd *cobra.Command, pmName string, pmArgs []string) error {
@@ -95,7 +129,9 @@ func runProxyWrap(cmd *cobra.Command, pmName string, pmArgs []string) error {
 	defer proxy.Close() //nolint:errcheck
 
 	registryURL := fmt.Sprintf("http://%s/", addr)
-	extraEnv := registryEnvForPM(pmName, registryURL)
+	// Canonicalize so a versioned pip variant (pip3.12) still gets PIP_INDEX_URL
+	// rather than falling through to the npm registry env.
+	extraEnv := registryEnvForPM(canonicalPM(pmName), registryURL)
 	extraEnv = append(extraEnv, fmt.Sprintf("%s=1", envSCActive))
 
 	exitCode, err := execPM(pmName, pmArgs, extraEnv)
@@ -119,7 +155,7 @@ func execPM(pm string, args []string, extraEnv []string) (int, error) {
 	// constant rather than the caller's argument, so there is no data-flow path
 	// from user input into the lookup. Resolving the user's own package manager
 	// from their PATH is the intended behavior of a transparent wrapper; only
-	// the four known names can ever reach this point.
+	// the known PM names enumerated below can ever reach this point.
 	var pmName string
 	switch pm {
 	case pmNPM:
@@ -130,11 +166,31 @@ func execPM(pm string, args []string, extraEnv []string) (int, error) {
 		pmName = pmBun
 	case pmYarn:
 		pmName = pmYarn
+	case pmPip:
+		pmName = pmPip
+	case pmUV:
+		pmName = pmUV
+	case pmPoetry:
+		pmName = pmPoetry
+	case pmPipenv:
+		pmName = pmPipenv
+	case pmPDM:
+		pmName = pmPDM
 	default:
-		return 1, fmt.Errorf("unsupported package manager: %s (allowed: npm, pnpm, bun, yarn)", pm)
+		// Versioned pip variants (pip3, pip3.11, pip3.12) must execute the exact
+		// binary the user invoked so the install lands in that interpreter's
+		// environment. IsPipVariant enforces a strict pattern (letters, digits, a
+		// single dotted numeric suffix), so the value reaching exec.LookPath is
+		// still a bounded, shell-metacharacter-free name rather than arbitrary
+		// user input — preserving the CWE-426 guarantee the literal cases provide.
+		if supplychain.IsPipVariant(pm) {
+			pmName = pm
+			break
+		}
+		return 1, fmt.Errorf("unsupported package manager: %s (allowed: npm, pnpm, bun, yarn, pip, uv, poetry, pipenv, pdm)", pm)
 	}
 
-	// armis:ignore cwe:426 reason:pmName is one of four hardcoded string literals selected by the switch above, never the user argument; resolving the user's own PM from PATH is the point of a transparent wrapper
+	// armis:ignore cwe:426 cwe:427 reason:pmName is one of the hardcoded string literals selected by the switch above, never the user argument; resolving the user's own PM from PATH is the point of a transparent wrapper
 	pmPath, err := exec.LookPath(pmName)
 	if err != nil {
 		return 1, fmt.Errorf("finding %s: %w", pm, err)
@@ -298,6 +354,18 @@ func registryEnvForPM(pm, registryURL string) []string {
 			fmt.Sprintf("npm_config_registry=%s", registryURL),
 			fmt.Sprintf("YARN_NPM_REGISTRY_SERVER=%s", registryURL),
 		}
+	case pmUV:
+		// registryURL is built by the caller with a trailing slash, so trim it
+		// before appending the PEP 503 "/simple/" path to avoid a "//simple/"
+		// double slash. Clients normalize it today, but the PyPI proxy handler
+		// (future work) should receive a clean "/simple/..." path.
+		return []string{
+			fmt.Sprintf("UV_INDEX_URL=%s/simple/", strings.TrimSuffix(registryURL, "/")),
+		}
+	case pmPip:
+		return []string{
+			fmt.Sprintf("PIP_INDEX_URL=%s/simple/", strings.TrimSuffix(registryURL, "/")),
+		}
 	default:
 		return []string{
 			fmt.Sprintf("npm_config_registry=%s", registryURL),
@@ -343,4 +411,157 @@ func resolveWrapPolicy() supplychain.Policy {
 		}
 	}
 	return supplychain.DefaultPolicy()
+}
+
+// requiresPreInstallBlock reports whether a package manager must be enforced via
+// a pre-install lockfile audit rather than the transparent registry proxy.
+// poetry, pipenv, and pdm resolve from their own lockfiles and do not honor an
+// npm-style registry override, so the proxy cannot filter young versions for
+// them; instead the build is blocked up front if the lockfile contains a
+// too-young package.
+func requiresPreInstallBlock(pm string) bool {
+	switch pm {
+	case pmPoetry, pmPipenv, pmPDM:
+		return true
+	}
+	return false
+}
+
+func runPreInstallBlock(cmd *cobra.Command, pmName string, pmArgs []string) error {
+	skipPkgs := parseSkipPackages(os.Getenv(envSCSkip))
+	policy := resolveWrapPolicy()
+
+	// Walk up from the current directory to find the lockfile. poetry/pdm/pipenv
+	// are commonly run from a subdirectory while the lockfile lives at the project
+	// root (monorepos, CI steps that cd into a service dir); probing only "." here
+	// would silently skip enforcement and run the build unprotected.
+	lockfilePath := supplychain.FindEcosystemLockfile(".", pmToEcosystem(pmName))
+
+	if lockfilePath == "" {
+		fmt.Fprintf(os.Stderr, "%s no lockfile found for %s, running without enforcement\n", scPrefix, pmName)
+		return exitWithCode(execPM(pmName, pmArgs, nil))
+	}
+
+	ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Minute)
+	defer cancel()
+
+	result, err := check.RunCheck(ctx, policy, lockfilePath, "")
+	if err != nil {
+		// Honor the fail-open policy the same way the proxy path does: with
+		// FailOpen set, a failed audit (e.g. PyPI unreachable, lockfile parse
+		// error) allows the build; otherwise it blocks. poetry/pipenv/pdm have
+		// no other enforcement path, so silently running on every audit error
+		// would let a transient failure bypass the control entirely.
+		if policy.FailOpen {
+			fmt.Fprintf(os.Stderr, "%s supply-chain: check failed, allowing (fail-open): %v\n", scPrefix, err)
+			return exitWithCode(execPM(pmName, pmArgs, nil))
+		}
+		fmt.Fprintf(os.Stderr, "%s supply-chain: check failed, blocking (fail-closed): %v\n", scPrefix, err)
+		fmt.Fprintf(os.Stderr, "  %s\n", "Set fail-open: true in .armis-supply-chain.yaml to allow installs when the check cannot run.")
+		os.Exit(1)
+		return nil
+	}
+
+	// Drop any violation whose package is in the skip list before deciding
+	// whether to block, so ARMIS_SUPPLY_CHAIN_SKIP works for the pre-install
+	// path the same way SkipPackages works for the proxy path.
+	skip := make(map[string]bool, len(skipPkgs))
+	for _, s := range skipPkgs {
+		skip[s] = true
+	}
+	var violations []supplychain.Violation
+	for _, v := range result.Violations {
+		if !skip[v.Name] {
+			violations = append(violations, v)
+		}
+	}
+
+	if len(violations) == 0 {
+		if result.Checked > 0 {
+			s := output.GetStyles()
+			fmt.Fprintf(os.Stderr, "%s %s %s %s\n",
+				s.MutedText.Render(scPrefix),
+				s.SuccessText.Render(output.IconSuccess),
+				s.SuccessText.Render(fmt.Sprintf("supply-chain: %d packages checked, all pass", result.Checked)),
+				s.MutedText.Render(fmt.Sprintf("(%s minimum age)", formatDurationShort(policy.MinReleaseAge))))
+		}
+		return exitWithCode(execPM(pmName, pmArgs, nil))
+	}
+
+	printPreInstallBlockSummary(violations, policy, pmName)
+	os.Exit(1)
+	return nil
+}
+
+func printPreInstallBlockSummary(violations []supplychain.Violation, policy supplychain.Policy, pmName string) {
+	s := output.GetStyles()
+
+	sort.Slice(violations, func(i, j int) bool {
+		return violations[i].Age < violations[j].Age
+	})
+
+	fmt.Fprintf(os.Stderr, "\n%s %s\n",
+		s.MutedText.Render(scPrefix),
+		s.WarningText.Render(fmt.Sprintf("supply-chain: BLOCKED — %d package(s) younger than %s", len(violations), formatDurationShort(policy.MinReleaseAge))))
+
+	fmt.Fprintf(os.Stderr, "  %s\n", s.MutedText.Render("Build was stopped BEFORE execution to prevent supply chain attacks."))
+
+	displayCount := len(violations)
+	if displayCount > maxBlockedDisplay {
+		displayCount = maxBlockedDisplay
+	}
+
+	fmt.Fprintf(os.Stderr, "\n  %s\n", s.MutedText.Render("Violations:"))
+	for _, v := range violations[:displayCount] {
+		age := formatDurationShort(v.Age)
+		dot := severityDot(s, v.Severity)
+		fmt.Fprintf(os.Stderr, "    %s %s %s\n",
+			dot,
+			s.Bold.Render(fmt.Sprintf("%s@%s", v.Name, v.Version)),
+			s.MutedText.Render(fmt.Sprintf("(published %s ago)", age)))
+	}
+	if remaining := len(violations) - displayCount; remaining > 0 {
+		fmt.Fprintf(os.Stderr, "    %s\n",
+			s.MutedText.Render(fmt.Sprintf("… and %d more", remaining)))
+	}
+
+	names := blockedViolationNames(violations)
+
+	fmt.Fprintf(os.Stderr, "\n  %s\n", s.MutedText.Render(strings.Repeat("─", scSepLen)))
+	if len(names) <= 3 {
+		fmt.Fprintf(os.Stderr, "  %s %s\n",
+			s.MutedText.Render("Bypass:"),
+			s.Bold.Render(fmt.Sprintf("%s=%s %s <args>", envSCSkip, strings.Join(names, ","), pmName)))
+	}
+	fmt.Fprintf(os.Stderr, "  %s %s\n",
+		s.MutedText.Render("Disable:"),
+		s.Bold.Render(fmt.Sprintf("%s=off %s <args>", envSCOff, pmName)))
+	fmt.Fprintf(os.Stderr, "  %s %s\n\n",
+		s.MutedText.Render("Exclude:"),
+		s.Bold.Render("add to exclusions in .armis-supply-chain.yaml"))
+}
+
+func blockedViolationNames(violations []supplychain.Violation) []string {
+	seen := make(map[string]bool)
+	names := make([]string, 0, len(violations))
+	for _, v := range violations {
+		if !seen[v.Name] {
+			seen[v.Name] = true
+			names = append(names, v.Name)
+		}
+	}
+	return names
+}
+
+func pmToEcosystem(pm string) supplychain.Ecosystem {
+	switch pm {
+	case pmPoetry:
+		return supplychain.EcosystemPoetry
+	case pmPipenv:
+		return supplychain.EcosystemPipfile
+	case pmPDM:
+		return supplychain.EcosystemPDM
+	default:
+		return ""
+	}
 }

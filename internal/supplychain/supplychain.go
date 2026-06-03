@@ -88,6 +88,12 @@ func ParseDuration(s string) (time.Duration, error) {
 		if err != nil {
 			return 0, fmt.Errorf("invalid duration %q: %w", s, err)
 		}
+		// time.ParseDuration accepts signed values (e.g. "-72h"). A negative
+		// min-age is nonsensical and would effectively disable age enforcement,
+		// so reject it the same way the custom d/w paths reject negatives.
+		if d < 0 {
+			return 0, fmt.Errorf("invalid duration %q: must not be negative", s)
+		}
 		return d, nil
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -15,12 +16,16 @@ const (
 )
 
 // validPMName bounds package-manager names to a safe shell identifier: a
-// lowercase letter followed by lowercase letters, digits, or hyphens. The
-// generated wrapper uses each name both as a shell function name and as a
-// literal command argument, so restricting it to this character set guarantees
-// no shell metacharacter (`;`, backtick, `$`, quotes, whitespace) can ever be
-// interpolated into the script written to a user's RC file.
-var validPMName = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
+// lowercase letter followed by lowercase letters, digits, or hyphens, with an
+// optional trailing `.<digits>` version suffix so versioned pip variants
+// (pip3.11, pip3.12) survive sanitization. The generated wrapper uses each name
+// both as a shell function name and as a literal command argument; a dot that
+// is only ever followed by digits is not a shell metacharacter, so this still
+// guarantees no metacharacter (`;`, backtick, `$`, quotes, whitespace) can be
+// interpolated into the script written to a user's RC file. bash and zsh accept
+// dotted function names; if a given shell rejects one the wrapper for that
+// variant simply has no effect, which is no worse than leaving it unwrapped.
+var validPMName = regexp.MustCompile(`^[a-z][a-z0-9-]*(\.[0-9]+)?$`)
 
 // maxPMNames caps how many package-manager wrappers a single generated script
 // can contain. The real universe is tiny (npm, pnpm, bun, yarn), so this
@@ -102,7 +107,7 @@ func generatePosixWrapper(pms []string, cli string) string {
 	var b strings.Builder
 	b.WriteString(markerStart + "\n")
 	for _, pm := range sanitizePMNames(pms) {
-		// armis:ignore cwe:78 reason:pm is constrained to ^[a-z][a-z0-9-]*$ by sanitizePMNames; safeCli is shellQuote-escaped
+		// armis:ignore cwe:78 reason:pm is constrained to ^[a-z][a-z0-9-]*(\.[0-9]+)?$ by sanitizePMNames, so any dot is followed only by digits (not a shell metacharacter); safeCli is shellQuote-escaped
 		fmt.Fprintf(&b, "%s() {\n  command %s supply-chain wrap %s \"$@\"\n}\n", pm, safeCli, pm)
 	}
 	b.WriteString(markerEnd + "\n")
@@ -116,7 +121,7 @@ func generateFishWrapper(pms []string, cli string) string {
 	var b strings.Builder
 	b.WriteString(markerStart + "\n")
 	for _, pm := range sanitizePMNames(pms) {
-		// armis:ignore cwe:78 reason:pm is constrained to ^[a-z][a-z0-9-]*$ by sanitizePMNames; safeCli is shellQuote-escaped
+		// armis:ignore cwe:78 reason:pm is constrained to ^[a-z][a-z0-9-]*(\.[0-9]+)?$ by sanitizePMNames, so any dot is followed only by digits (not a shell metacharacter); safeCli is shellQuote-escaped
 		fmt.Fprintf(&b, "function %s\n  command %s supply-chain wrap %s $argv\nend\n", pm, safeCli, pm)
 	}
 	b.WriteString(markerEnd + "\n")
@@ -276,4 +281,59 @@ func HasInjection(path string) bool {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// pipExecutable matches pip, pip3, and versioned variants like pip3.11 / pip3.12,
+// so a project that pins a specific interpreter still gets every pip on PATH wrapped.
+var pipExecutable = regexp.MustCompile(`^pip3?(\.[0-9]+)?$`)
+
+// IsPipVariant reports whether name is pip or a versioned pip variant (pip3,
+// pip3.11, pip3.12). Every variant resolves to PyPI and shares one enforcement
+// policy, so callers canonicalize variants to "pip" for policy decisions while
+// still executing the exact binary the user invoked (pip3.12 must install into
+// the Python 3.12 environment, not a generic pip). The pattern is strict
+// (letters, digits, a single dotted numeric suffix), so it also bounds the
+// value that downstream exec.LookPath callers may treat as a trusted PM name.
+func IsPipVariant(name string) bool {
+	return pipExecutable.MatchString(name)
+}
+
+// DetectPipVariants scans $PATH for pip executables (pip, pip3, pip3.11, …) and
+// returns a deduplicated, sorted list of the command names found. pip installs
+// under several names depending on how Python was set up, and a shell wrapper
+// only shadows the exact name the user types, so all present variants must be
+// wrapped. Falls back to ["pip"] when none are found or PATH is unset.
+func DetectPipVariants() []string {
+	pathEnv := os.Getenv("PATH")
+	if pathEnv == "" {
+		return []string{"pip"}
+	}
+
+	seen := make(map[string]bool)
+	for _, dir := range filepath.SplitList(pathEnv) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if pipExecutable.MatchString(name) {
+				seen[name] = true
+			}
+		}
+	}
+
+	if len(seen) == 0 {
+		return []string{"pip"}
+	}
+
+	variants := make([]string, 0, len(seen))
+	for name := range seen {
+		variants = append(variants, name)
+	}
+	slices.Sort(variants)
+	return variants
 }
