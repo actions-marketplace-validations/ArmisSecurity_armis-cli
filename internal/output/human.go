@@ -23,7 +23,14 @@ import (
 )
 
 const (
+	// noneValue is the neutral "none" literal shared across unrelated domains
+	// (the group-by option and the SARIF "none" level). Domain-specific
+	// constants derive from it so call sites reference the name that matches
+	// their own semantics rather than borrowing another domain's.
+	noneValue = "none"
+
 	groupBySeverity = "severity"
+	groupByNone     = noneValue
 	noCWELabel      = "No CWE"
 
 	// Resource limits for snippet loading to prevent memory exhaustion (CWE-770)
@@ -284,7 +291,7 @@ func (iw *indentWriter) Write(p []byte) (int, error) {
 
 // Format formats the scan result in human-readable format with default options.
 func (f *HumanFormatter) Format(result *model.ScanResult, w io.Writer) error {
-	return f.FormatWithOptions(result, w, FormatOptions{GroupBy: "none"})
+	return f.FormatWithOptions(result, w, FormatOptions{GroupBy: groupByNone})
 }
 
 // FormatWithOptions formats the scan result in human-readable format with custom options.
@@ -340,7 +347,7 @@ func (f *HumanFormatter) FormatWithOptions(result *model.ScanResult, w io.Writer
 		ew.write("%s\n", sectionStyle.Render("FINDINGS"))
 
 		// 5. Individual findings
-		if opts.GroupBy != "" && opts.GroupBy != "none" {
+		if opts.GroupBy != "" && opts.GroupBy != groupByNone {
 			groups := groupFindings(displayFindings, opts.GroupBy)
 			renderGroupedFindings(w, groups, opts)
 		} else {
