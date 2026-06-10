@@ -9,9 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Release pipeline now maintains floating major (`v1`) and minor (`v1.10`) version tags, so the GitHub Action can be consumed via `uses: ArmisSecurity/armis-cli@v1` and receive non-breaking updates automatically (#213)
+- Documented the one-time GitHub Marketplace publishing steps for the Armis CLI Action in `docs/DISTRIBUTION-SETUP.md` (#213)
+
 ### Changed
 
+- CI/CD documentation and example workflows now recommend pinning the GitHub Action to `@v1` instead of `@main` (#213)
+- Marketplace sample workflow now references the repository's own `ArmisSecurity/armis-cli@v1` action with structured inputs (#213)
+
 ### Deprecated
+
+- The local composite action at `.github/actions/armis-cli-action/` is deprecated in favor of the top-level `action.yml` (`ArmisSecurity/armis-cli@v1`) (#213)
 
 ### Removed
 

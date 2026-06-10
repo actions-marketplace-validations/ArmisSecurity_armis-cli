@@ -3,7 +3,13 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      # Match tags containing a major.minor.patch segment (e.g. v1.10.3), NOT
+      # the floating major/minor aliases (v1, v1.10) that update-aliases
+      # force-pushes below. GitHub's tag glob treats "*" as matching dots, so
+      # "v*.*.*" requires two literal dots and excludes the aliases, preventing
+      # a release re-trigger loop. Note: pre-release tags like v1.10.3-rc.1
+      # also match; rely on the regex guard in update-aliases for filtering.
+      - "v*.*.*"
 
 permissions:
   contents: read
@@ -130,3 +136,71 @@ jobs:
       base64-subjects: "${{ needs.goreleaser.outputs.hashes }}"
       upload-assets: true
       private-repository: true
+
+  update-aliases:
+    name: Update floating version tags
+    needs: [goreleaser]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Fetch all tags
+        # update-aliases reads the full local tag set (git tag --sort=-v:refname)
+        # to compute LATEST_FOR_MAJOR. checkout populates tags, but mirror the
+        # goreleaser job's explicit fetch so the set is guaranteed complete and
+        # the script can't compute a stale alias or fail under set -euo pipefail.
+        run: git fetch --force --tags
+
+      - name: Move major and minor tags to this release
+        env:
+          # The released version tag that triggered this run, e.g. "v1.10.3".
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          # Only operate on full semver tags (vN.M.P). Skip pre-releases so
+          # consumers pinning @vN never get a -rc/-beta build.
+          if ! printf '%s' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Skipping alias update for non-stable tag: $RELEASE_TAG"
+            exit 0
+          fi
+
+          MAJOR="${RELEASE_TAG%%.*}"   # v1.10.3 -> v1
+          MINOR="${RELEASE_TAG%.*}"    # v1.10.3 -> v1.10
+
+          # Find the highest stable tag for this major line so we never move
+          # the floating alias backwards (e.g. if v1.9.9 is released after
+          # v1.10.3, v1 must stay on v1.10.3, not regress to v1.9.9).
+          LATEST_FOR_MAJOR=$(git tag --sort=-v:refname \
+            | grep -E "^${MAJOR}\.[0-9]+\.[0-9]+$" \
+            | head -1)
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Always update the minor alias — a backport to v1.9.x never shares
+          # the same minor, so this is always monotonic.
+          echo "Pointing $MINOR at $RELEASE_TAG ($GITHUB_SHA)"
+          git tag -f "$MINOR" "$GITHUB_SHA"
+
+          # Only update the major alias if this release is the highest semver
+          # tag for this major line.
+          if [ "$LATEST_FOR_MAJOR" = "$RELEASE_TAG" ]; then
+            echo "Pointing $MAJOR at $RELEASE_TAG ($GITHUB_SHA)"
+            git tag -f "$MAJOR" "$GITHUB_SHA"
+          else
+            echo "Skipping $MAJOR update: $RELEASE_TAG is not the latest for $MAJOR (latest is $LATEST_FOR_MAJOR)"
+          fi
+
+          # Force-push the aliases. These pushes use GITHUB_TOKEN and target
+          # tags excluded by the "v*.*.*" trigger filter, so they do not
+          # re-trigger this release workflow.
+          git push -f origin "$MINOR"
+          if [ "$LATEST_FOR_MAJOR" = "$RELEASE_TAG" ]; then
+            git push -f origin "$MAJOR"
+          fi
